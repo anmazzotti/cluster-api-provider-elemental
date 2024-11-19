@@ -22,8 +22,8 @@ const (
 	Elemental_GetRegistration_FullMethodName = "/Elemental/GetRegistration"
 	Elemental_CreateHost_FullMethodName      = "/Elemental/CreateHost"
 	Elemental_DeleteHost_FullMethodName      = "/Elemental/DeleteHost"
-	Elemental_PatchHost_FullMethodName       = "/Elemental/PatchHost"
 	Elemental_GetBootstrap_FullMethodName    = "/Elemental/GetBootstrap"
+	Elemental_ReconcileHost_FullMethodName   = "/Elemental/ReconcileHost"
 )
 
 // ElementalClient is the client API for Elemental service.
@@ -33,8 +33,8 @@ type ElementalClient interface {
 	GetRegistration(ctx context.Context, in *RegistrationRequest, opts ...grpc.CallOption) (*RegistrationResponse, error)
 	CreateHost(ctx context.Context, in *HostCreateRequest, opts ...grpc.CallOption) (*HostResponse, error)
 	DeleteHost(ctx context.Context, in *HostDeleteRequest, opts ...grpc.CallOption) (*HostDeleteResponse, error)
-	PatchHost(ctx context.Context, in *HostPatchRequest, opts ...grpc.CallOption) (*HostResponse, error)
 	GetBootstrap(ctx context.Context, in *BootstrapRequest, opts ...grpc.CallOption) (*BootstrapResponse, error)
+	ReconcileHost(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[HostPatchRequest, HostResponse], error)
 }
 
 type elementalClient struct {
@@ -75,16 +75,6 @@ func (c *elementalClient) DeleteHost(ctx context.Context, in *HostDeleteRequest,
 	return out, nil
 }
 
-func (c *elementalClient) PatchHost(ctx context.Context, in *HostPatchRequest, opts ...grpc.CallOption) (*HostResponse, error) {
-	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(HostResponse)
-	err := c.cc.Invoke(ctx, Elemental_PatchHost_FullMethodName, in, out, cOpts...)
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
 func (c *elementalClient) GetBootstrap(ctx context.Context, in *BootstrapRequest, opts ...grpc.CallOption) (*BootstrapResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(BootstrapResponse)
@@ -95,6 +85,19 @@ func (c *elementalClient) GetBootstrap(ctx context.Context, in *BootstrapRequest
 	return out, nil
 }
 
+func (c *elementalClient) ReconcileHost(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[HostPatchRequest, HostResponse], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &Elemental_ServiceDesc.Streams[0], Elemental_ReconcileHost_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[HostPatchRequest, HostResponse]{ClientStream: stream}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type Elemental_ReconcileHostClient = grpc.BidiStreamingClient[HostPatchRequest, HostResponse]
+
 // ElementalServer is the server API for Elemental service.
 // All implementations must embed UnimplementedElementalServer
 // for forward compatibility.
@@ -102,8 +105,8 @@ type ElementalServer interface {
 	GetRegistration(context.Context, *RegistrationRequest) (*RegistrationResponse, error)
 	CreateHost(context.Context, *HostCreateRequest) (*HostResponse, error)
 	DeleteHost(context.Context, *HostDeleteRequest) (*HostDeleteResponse, error)
-	PatchHost(context.Context, *HostPatchRequest) (*HostResponse, error)
 	GetBootstrap(context.Context, *BootstrapRequest) (*BootstrapResponse, error)
+	ReconcileHost(grpc.BidiStreamingServer[HostPatchRequest, HostResponse]) error
 	mustEmbedUnimplementedElementalServer()
 }
 
@@ -123,11 +126,11 @@ func (UnimplementedElementalServer) CreateHost(context.Context, *HostCreateReque
 func (UnimplementedElementalServer) DeleteHost(context.Context, *HostDeleteRequest) (*HostDeleteResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method DeleteHost not implemented")
 }
-func (UnimplementedElementalServer) PatchHost(context.Context, *HostPatchRequest) (*HostResponse, error) {
-	return nil, status.Errorf(codes.Unimplemented, "method PatchHost not implemented")
-}
 func (UnimplementedElementalServer) GetBootstrap(context.Context, *BootstrapRequest) (*BootstrapResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method GetBootstrap not implemented")
+}
+func (UnimplementedElementalServer) ReconcileHost(grpc.BidiStreamingServer[HostPatchRequest, HostResponse]) error {
+	return status.Errorf(codes.Unimplemented, "method ReconcileHost not implemented")
 }
 func (UnimplementedElementalServer) mustEmbedUnimplementedElementalServer() {}
 func (UnimplementedElementalServer) testEmbeddedByValue()                   {}
@@ -204,24 +207,6 @@ func _Elemental_DeleteHost_Handler(srv interface{}, ctx context.Context, dec fun
 	return interceptor(ctx, in, info, handler)
 }
 
-func _Elemental_PatchHost_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(HostPatchRequest)
-	if err := dec(in); err != nil {
-		return nil, err
-	}
-	if interceptor == nil {
-		return srv.(ElementalServer).PatchHost(ctx, in)
-	}
-	info := &grpc.UnaryServerInfo{
-		Server:     srv,
-		FullMethod: Elemental_PatchHost_FullMethodName,
-	}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(ElementalServer).PatchHost(ctx, req.(*HostPatchRequest))
-	}
-	return interceptor(ctx, in, info, handler)
-}
-
 func _Elemental_GetBootstrap_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(BootstrapRequest)
 	if err := dec(in); err != nil {
@@ -239,6 +224,13 @@ func _Elemental_GetBootstrap_Handler(srv interface{}, ctx context.Context, dec f
 	}
 	return interceptor(ctx, in, info, handler)
 }
+
+func _Elemental_ReconcileHost_Handler(srv interface{}, stream grpc.ServerStream) error {
+	return srv.(ElementalServer).ReconcileHost(&grpc.GenericServerStream[HostPatchRequest, HostResponse]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type Elemental_ReconcileHostServer = grpc.BidiStreamingServer[HostPatchRequest, HostResponse]
 
 // Elemental_ServiceDesc is the grpc.ServiceDesc for Elemental service.
 // It's only intended for direct use with grpc.RegisterService,
@@ -260,14 +252,17 @@ var Elemental_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _Elemental_DeleteHost_Handler,
 		},
 		{
-			MethodName: "PatchHost",
-			Handler:    _Elemental_PatchHost_Handler,
-		},
-		{
 			MethodName: "GetBootstrap",
 			Handler:    _Elemental_GetBootstrap_Handler,
 		},
 	},
-	Streams:  []grpc.StreamDesc{},
+	Streams: []grpc.StreamDesc{
+		{
+			StreamName:    "ReconcileHost",
+			Handler:       _Elemental_ReconcileHost_Handler,
+			ServerStreams: true,
+			ClientStreams: true,
+		},
+	},
 	Metadata: "pkg/api/proto/v1/elemental.proto",
 }

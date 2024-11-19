@@ -5,11 +5,14 @@ service Elemental {
     rpc GetRegistration(RegistrationRequest) returns (RegistrationResponse);
     rpc CreateHost(HostCreateRequest) returns (HostResponse);
     rpc DeleteHost(HostDeleteRequest) returns (HostDeleteResponse);
-    rpc PatchHost(HostPatchRequest) returns (HostResponse);
     rpc GetBootstrap(BootstrapRequest) returns (BootstrapResponse);
+    rpc ReconcileHost(stream HostPatchRequest) returns (stream HostResponse);
 }
 
-message RegistrationRequest {}
+message RegistrationRequest {
+    string name = 1;
+    string namespace = 2;
+}
 
 message RegistrationResponse {
     map<string, string> hostAnnotations = 1;
@@ -36,6 +39,7 @@ message AgentConfig {
     uint32 reconciliation = 8;
     bool useSystemCertPool = 9;
     string workDir = 10;
+    GrpcServerConfig grpc = 11;
 }
 
 message HostnameConfig {
@@ -51,27 +55,39 @@ message PostAction {
 message RegistrationConfig {
     bytes caCert = 1;
     string token = 2;
-    string uri = 3;
+    string name = 3;
+    string namespace = 4;
+}
+
+message GrpcServerConfig { 
+    string address = 1;
+    uint32 port = 2;
 }
 
 message HostCreateRequest {
-    map<string, string> annotations = 1;
-    map<string, string> labels = 2;
-    string name = 3;
-    string pubKey = 4;
+    string name = 1;
+    string namespace = 2;
+    map<string, string> annotations = 3;
+    map<string, string> labels = 4;
+    string pubKey = 5;
 }
 
-message HostDeleteRequest {}
+message HostDeleteRequest {
+    string name = 1;
+    string namespace = 2;
+}
 
 message HostPatchRequest {
-    map<string, string> annotations = 1;
-    map<string, string> labels = 2;
-    HostCondition condition = 3;
-    InPlaceUpdate inPlaceUpdate = 4;
-    bool installed = 5;
-    bool bootstrapped = 6;
-    bool reset = 7;
-    HostPhase phase = 8;
+    string name = 1;
+    string namespace = 2;
+    map<string, string> annotations = 3;
+    map<string, string> labels = 4;
+    HostCondition condition = 5;
+    InPlaceUpdate inPlaceUpdate = 6;
+    bool installed = 7;
+    bool bootstrapped = 8;
+    bool reset = 9;
+    HostPhase phase = 10;
 }
 
 enum InPlaceUpdate {
@@ -114,7 +130,10 @@ message HostResponse {
 
 message HostDeleteResponse {}
 
-message BootstrapRequest {}
+message BootstrapRequest {
+    string hostName = 1;
+    string hostNamespace = 2;
+}
 
 message BootstrapResponse {
     string format = 1;

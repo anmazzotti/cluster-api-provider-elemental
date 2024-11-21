@@ -22,6 +22,7 @@ import (
 	"github.com/rancher-sandbox/cluster-api-provider-elemental/internal/log"
 	pb "github.com/rancher-sandbox/cluster-api-provider-elemental/pkg/api/proto/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	clusterv1 "sigs.k8s.io/cluster-api/api/v1beta1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -125,34 +126,47 @@ func (s *server) GetBootstrap(context.Context, *pb.BootstrapRequest) (*pb.Bootst
 	return nil, status.Errorf(codes.Unimplemented, "method GetBootstrap not implemented")
 }
 func (s *server) ReconcileHost(stream grpc.BidiStreamingServer[pb.HostPatchRequest, pb.HostResponse]) error {
-	incoming, err := stream.Recv()
-	if errors.Is(err, io.EOF) {
-		s.logger.Info("Stream closed before any message was received")
-		return nil
+	// Fetch host from authenticated wrapped stream
+	validatedHost := stream.Context().Value(contextKey(validatedHostKey))
+	if validatedHost == nil {
+		s.logger.Info("Closing stream due to missing validated ElementalHost")
+		return status.Errorf(codes.Internal, "Missing validated ElementalHost")
 	}
-	if err != nil {
-		return fmt.Errorf("reading first time stream: %w", err)
-	}
-	// !! Validation/Auth can happen here !!
-	logger := s.logger.WithValues(log.KeyNamespace, incoming.Namespace).
-		WithValues(log.KeyElementalHost, incoming.Name)
 
-	// Since we no longer validate messages after the stream is open, it's important to set a static host key.
-	// This is to prevent the host from assuming different identities (patching other hosts) after authentication.
-	hostKey := client.ObjectKey{Namespace: incoming.Namespace, Name: incoming.Name}
+	host, ok := validatedHost.(v1beta1.ElementalHost)
+	if !ok {
+		s.logger.Info("Closing stream due to validated ElementalHost being incorrect type")
+		return status.Errorf(codes.Internal, "Validated ElementalHost is incorrect type")
+	}
+
+	logger := s.logger.WithValues(log.KeyNamespace, host.Namespace).
+		WithValues(log.KeyElementalHost, host.Name)
 
 	// Always send back a first response.
 	// This gives the consumer a chance to reconcile from previously unreceived messages,
 	// even if the ElementalHost has not mutated meanwhile.
-	if err := s.sendElementalHostToStream(hostKey, stream); err != nil {
-		return fmt.Errorf("sending first ElementalHost to stream: %w", err)
+	response, err := getElementalHostResponse(host)
+	if err != nil {
+		logger.Error(err, "Could not format HostResponse")
+		return status.Errorf(codes.Internal, "getting HostResponse: %s", err.Error())
 	}
+	if err := stream.Send(response); err != nil {
+		logger.Error(err, "Could not send HostResponse")
+		return status.Errorf(codes.DataLoss, "sending HostResponse: %s", err.Error())
+	}
+
+	// Since we no longer validate messages after the stream is open, it's important to set a static host key.
+	// This is to prevent the host from assuming different identities (patching other hosts) after authentication.
+	hostKey := client.ObjectKey{Namespace: host.Namespace, Name: host.Name}
 
 	// Asynchronously patch ElementalHost resource from stream input
 	// Note: stream.Recv() can be consumed concurrently to stream.Send()
+	readingErrors := make(chan error, 1)
+	var readingErrorCode codes.Code
 	go func() {
-		if err := s.updateElementalHostFromStream(logger, hostKey, stream); err != nil {
-			logger.Error(err, "Failed to consume stream")
+		if code, err := s.updateElementalHostFromStream(logger, hostKey, stream); err != nil {
+			readingErrorCode = code
+			readingErrors <- err
 			return
 		}
 	}()
@@ -165,47 +179,57 @@ func (s *server) ReconcileHost(stream grpc.BidiStreamingServer[pb.HostPatchReque
 		select {
 		case <-s.hosts[hostKey.String()]:
 			logger.Info("Sending update")
-			if err := s.sendElementalHostToStream(hostKey, stream); err != nil {
-				return fmt.Errorf("sending ElementalHost to stream: %w", err)
+			if code, err := s.sendElementalHostToStream(hostKey, stream); err != nil {
+				return status.Errorf(code, "sending ElementalHost to stream: %s", err.Error())
 			}
 		case <-stream.Context().Done():
 			// Stream is closed
 			return nil
+		case err := <-readingErrors:
+			// If we can no longer consume the stream, close it
+			logger.Error(err, "Failed to consume ElementalHost stream")
+			return status.Errorf(readingErrorCode, "consuming ElementalHost stream: %s", err.Error())
 		}
 	}
 }
 
-func (s *server) sendElementalHostToStream(key types.NamespacedName, stream grpc.BidiStreamingServer[pb.HostPatchRequest, pb.HostResponse]) error {
+func (s *server) sendElementalHostToStream(key types.NamespacedName, stream grpc.BidiStreamingServer[pb.HostPatchRequest, pb.HostResponse]) (codes.Code, error) {
 	elementalHost := &v1beta1.ElementalHost{}
 	if err := s.k8sClient.Get(stream.Context(), key, elementalHost); err != nil {
-		return fmt.Errorf("getting ElementalHost: %w", err)
+		if apierrors.IsNotFound(err) {
+			return codes.NotFound, fmt.Errorf("ElementalHost '%s' not found", key)
+		}
+		return codes.Internal, fmt.Errorf("getting ElementalHost: %w", err)
 	}
 
 	response, err := getElementalHostResponse(*elementalHost)
 	if err != nil {
-		return fmt.Errorf("getting HostResponse: %w", err)
+		return codes.Internal, fmt.Errorf("getting HostResponse: %w", err)
 	}
 
 	if err := stream.Send(response); err != nil {
-		return fmt.Errorf("sending HostResponse: %w", err)
+		return codes.DataLoss, fmt.Errorf("sending HostResponse: %w", err)
 	}
-	return nil
+	return codes.OK, nil
 }
 
-func (s *server) updateElementalHostFromStream(logger logr.Logger, key types.NamespacedName, stream grpc.BidiStreamingServer[pb.HostPatchRequest, pb.HostResponse]) error {
+func (s *server) updateElementalHostFromStream(logger logr.Logger, key types.NamespacedName, stream grpc.BidiStreamingServer[pb.HostPatchRequest, pb.HostResponse]) (codes.Code, error) {
 	for {
 		incoming, err := stream.Recv()
 		if errors.Is(err, io.EOF) {
 			logger.Info("Stream closed")
-			return nil
+			return codes.OK, nil
 		}
 		if err != nil {
-			return fmt.Errorf("reading stream: %w", err)
+			return codes.DataLoss, fmt.Errorf("reading stream: %w", err)
 		}
-		err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		err = retry.RetryOnConflict(retry.DefaultBackoff, func() error {
 			// Always refresh resource on each attempt
 			elementalHost := &v1beta1.ElementalHost{}
 			if err := s.k8sClient.Get(stream.Context(), key, elementalHost); err != nil {
+				if apierrors.IsNotFound(err) {
+					return fmt.Errorf("ElementalHost '%s' not found", key.String())
+				}
 				return fmt.Errorf("getting ElementalHost: %w", err)
 			}
 
@@ -220,7 +244,10 @@ func (s *server) updateElementalHostFromStream(logger logr.Logger, key types.Nam
 			return patchHelper.Patch(stream.Context(), elementalHost)
 		})
 		if err != nil {
-			return fmt.Errorf("patching ElementalHost: %w", err)
+			if apierrors.IsNotFound(err) {
+				return codes.NotFound, fmt.Errorf("ElementalHost '%s' not found", key.String())
+			}
+			return codes.Internal, fmt.Errorf("patching ElementalHost: %w", err)
 		}
 	}
 }
